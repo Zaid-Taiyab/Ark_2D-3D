@@ -10,6 +10,16 @@ from convnext import ConvNeXt
 from timm.models.helpers import load_state_dict
 
 from utils import remap_pretrained_keys_swin
+from unified_swin import ArkUnifiedSwin, load_ark_checkpoint
+
+# Unified 2D/3D models. window2d MUST equal the window of the checkpoint you initialise from:
+#   7  -> swin_base_patch4_window7_224 (ImageNet) / Ark-6 Swin-B 224
+#   12 -> swin_base_patch4_window12_384 (ImageNet) / Ark+ Swin-L 768
+UNIFIED_CFGS = {
+    "unified_swin_base":      dict(embed_dim=128, depths=(2, 2, 18, 2), heads=(4, 8, 16, 32), window2d=7),
+    "unified_swin_base_384":  dict(embed_dim=128, depths=(2, 2, 18, 2), heads=(4, 8, 16, 32), window2d=12),
+    "unified_swin_large_768": dict(embed_dim=192, depths=(2, 2, 18, 2), heads=(6, 12, 24, 48), window2d=12),
+}
 
 
 class ArkSwinTransformer(swin.SwinTransformer):
@@ -113,6 +123,17 @@ def build_omni_model(args, num_classes_list):
         model = ArkSwinTransformer(num_classes_list, args.projector_features, args.use_mlp, img_size =768, patch_size=4, window_size=12, embed_dim=192, depths=(2, 2, 18, 2), num_heads=(6, 12, 24, 48))
     elif args.model_name == "swin_large_1152": #swin_large_patch4_window12_384
         model = ArkSwinTransformer(num_classes_list, args.projector_features, args.use_mlp, img_size =1152, patch_size=4, window_size=12, embed_dim=192, depths=(2, 2, 18, 2), num_heads=(6, 12, 24, 48))
+    elif args.model_name in UNIFIED_CFGS: # Swin-B / Swin-L + switchable 2D/3D patch embedding
+        model = ArkUnifiedSwin(num_classes_list, args.projector_features, args.use_mlp,
+                               window_depth=args.window_depth, patch3d=(args.patch_depth, 4, 4),
+                               use_checkpoint=args.grad_checkpoint, **UNIFIED_CFGS[args.model_name])
+        if args.pretrained_weights is not None:
+            head_map = None
+            if args.pretrained_heads:
+                src_order = [s.strip() for s in args.pretrained_heads.split(',')]
+                head_map = {src_order.index(d): j for j, d in enumerate(args.dataset_list) if d in src_order}
+            load_ark_checkpoint(model, args.pretrained_weights, key=args.pretrained_key, head_map=head_map)
+        return model
     elif args.model_name == "conv_base":
         model = ArkConvNeXt(num_classes_list, args.projector_features, args.use_mlp, depths=[3, 3, 27, 3], dims=[128, 256, 512, 1024])
         # url='https://dl.fbaipublicfiles.com/convnext/convnext_base_22k_1k_224.pth'

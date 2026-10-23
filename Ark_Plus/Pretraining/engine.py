@@ -53,21 +53,32 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
     output_file = os.path.join(output_path, exp+"_"+args.exp_name+"_results.txt")
 
     # dataloaders for pretraining
+    # per-dataset overrides from datasets_config.yaml: dims (2|3), batch_size, accum_steps, drr_head
+    is_3d_list = [datasets_config[d].get('dims', 2) == 3 for d in dataset_list]
+    bs_list = [datasets_config[d].get('batch_size', args.batch_size) for d in dataset_list]
     data_loader_list_train = []
-    for d in dataset_train_list:
-        data_loader_list_train.append(DataLoader(dataset=d, batch_size=args.batch_size, shuffle=True,
+    for k, d in enumerate(dataset_train_list):
+        data_loader_list_train.append(DataLoader(dataset=d, batch_size=bs_list[k], shuffle=True,
                                         num_workers=args.workers, pin_memory=True))
     data_loader_list_val = []
-    for dv in dataset_val_list:
-        data_loader_list_val.append(DataLoader(dataset=dv, batch_size=args.batch_size, shuffle=False,
+    for k, dv in enumerate(dataset_val_list):
+        data_loader_list_val.append(DataLoader(dataset=dv, batch_size=bs_list[k], shuffle=False,
                                         num_workers=args.workers, pin_memory=True))
     data_loader_list_test = []
-    for dt in dataset_test_list: 
-        data_loader_list_test.append(DataLoader(dataset=dt, batch_size=int(args.batch_size/2), shuffle=False,
+    for k, dt in enumerate(dataset_test_list): 
+        data_loader_list_test.append(DataLoader(dataset=dt, batch_size=bs_list[k] if is_3d_list[k] else int(args.batch_size/2), shuffle=False,
                                         num_workers=args.workers, pin_memory=True))
 
     num_classes_list = [len(datasets_config[dataset]['diseases']) for dataset in dataset_list]
+    # extra DRR heads (one per 3D dataset with drr_head: true), appended after all dataset heads
+    drr_head_index = {}
+    for k, d in enumerate(dataset_list):
+        if datasets_config[d].get('drr_head', False):
+            drr_head_index[k] = len(num_classes_list)
+            num_classes_list.append(len(datasets_config[d]['diseases']))
     print("num_classes_list:", num_classes_list)
+    if drr_head_index:
+        print("DRR heads (dataset index -> head index):", drr_head_index)
 
 
     # training setups
@@ -98,6 +109,15 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
     lr_scheduler = WarmupCosineScheduler(optimizer, args.pretrain_epochs, args.warmup_epochs, args.warmup_lr, args.lr, args.min_lr)
     print(lr_scheduler.describe())
 
+    def set_pretrained_frozen(frozen):
+        # new_param_names is set by unified_swin.load_ark_checkpoint (3D stem, dim embedding, new heads)
+        core = model.module if hasattr(model, 'module') else model
+        new_names = getattr(core, 'new_param_names', set())
+        if not new_names:
+            return
+        for n, p in core.named_parameters():
+            p.requires_grad = (not frozen) or (n in new_names)
+
     start_epoch = 0
     init_loss = 999999
     best_val_loss = init_loss
@@ -108,13 +128,16 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
             resume = save_model_path + '.pth.tar'
             if os.path.isfile(resume):
                 print("=> loading checkpoint '{}'".format(resume))
-                checkpoint = torch.load(resume, weights_only=False)
+                try:
+                    checkpoint = torch.load(resume, map_location='cpu', weights_only=False)
+                except TypeError:  # torch < 1.13
+                    checkpoint = torch.load(resume, map_location='cpu')
                 start_epoch = checkpoint['epoch']
                 init_loss = checkpoint['lossMIN']
                 state_dict = checkpoint['state_dict']
                 teacher_state_dict = checkpoint['teacher']
                 
-                if getattr(args, 'reinit_heads', False): 
+                if args.reinit_heads: 
                     for k in model.state_dict().keys():
                         if k.startswith('omni_heads.'):
                             print(f"Removing key {k} from pretrained checkpoint")
@@ -163,9 +186,16 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
             print('Epoch {:04d}: lr = {:.6g}'.format(epoch, current_lr))
             with open(log_file, 'a') as _lr_log:
                 _lr_log.write('Epoch {:04d}: lr = {:.6g}\n'.format(epoch, current_lr))
+            warmup_3d = epoch < args.freeze_pretrained_epochs
+            set_pretrained_frozen(warmup_3d)
             for i, data_loader in enumerate(data_loader_list_train): 
+                if warmup_3d and not is_3d_list[i]:
+                    it += 1   # keep the momentum schedule aligned; 2D datasets have nothing new to train yet
+                    continue
                 criterion = torch.nn.CrossEntropyLoss() if datasets_config[dataset_list[i]]['task_type'] == "multi-class classification" else torch.nn.BCEWithLogitsLoss()
-                train_one_epoch(model, i, dataset_list[i], data_loader, device, criterion, optimizer, epoch, args.ema_mode, teacher, momentum_schedule, it)
+                train_one_epoch(model, i, dataset_list[i], data_loader, device, criterion, optimizer, epoch, args.ema_mode, teacher, momentum_schedule, it,
+                                drr_head_n=drr_head_index.get(i), w_xdim=args.w_xdim,
+                                accum_steps=datasets_config[dataset_list[i]].get('accum_steps', 1), use_amp=args.amp)
                 it += 1
             val_loss_list = []
             for i, dv in enumerate(data_loader_list_val):
@@ -220,8 +250,8 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                         writer.write("{} Disease = {}\n".format(dataset, diseases))
 
                         multiclass =  datasets_config[dataset]['task_type'] == "multi-class classification"
-                        y_test, p_test = test_classification(model, i, data_loader_list_test[i], device, multiclass)
-                        y_test_teacher, p_test_teacher = test_classification(teacher, i, data_loader_list_test[i], device, multiclass)
+                        y_test, p_test = test_classification(model, i, data_loader_list_test[i], device, multiclass, is_3d=is_3d_list[i])
+                        y_test_teacher, p_test_teacher = test_classification(teacher, i, data_loader_list_test[i], device, multiclass, is_3d=is_3d_list[i])
                         if multiclass:
                             acc = accuracy_score(np.argmax(y_test.cpu().numpy(),axis=1),np.argmax(p_test.cpu().numpy(),axis=1))
                             acc_teacher = accuracy_score(np.argmax(y_test_teacher.cpu().numpy(),axis=1),np.argmax(p_test_teacher.cpu().numpy(),axis=1))
@@ -262,6 +292,3 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
         with open(output_file, 'a') as writer:
             writer.write("Omni-pretraining stage: \nStudent meanAUC = \n{} \nTeacher meanAUC = \n{}\n".format(np.array2string(np.array(test_results), precision=4, separator='\t'),np.array2string(np.array(test_results_teacher), precision=4, separator='\t')))
         writer.close()
-
-    
-        

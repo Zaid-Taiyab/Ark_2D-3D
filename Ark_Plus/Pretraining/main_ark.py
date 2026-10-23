@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from utils import vararg_callback_bool, vararg_callback_int, get_config
 from dataloader import  *
+import dataloader_3d  # registers 3D datasets (CTVolume) into dict_dataloarder
 
 import torch
 from engine import omni_engine
@@ -21,7 +22,7 @@ def get_args_parser():
 
     parser.add_option("--GPU", dest="GPU", help="the index of gpu is used", default=None, action="callback",
                       callback=vararg_callback_int)
-    parser.add_option("--model", dest="model_name", help="swin_base|swin_large|swin_large_384|swin_large_768|conv_base", default="swin_base", type="string")
+    parser.add_option("--model", dest="model_name", help="swin_base|swin_large|swin_large_384|swin_large_768|conv_base|unified_swin_base|unified_swin_base_384|unified_swin_large_768", default="swin_base", type="string")
     parser.add_option("--init", dest="init",help="Random| ImageNet_1k| ImageNet_21k| SAM| DeiT| BEiT| DINO| MoCo_V3| MoBY | MAE| SimMIM", default="Random", type="string")
     parser.add_option("--pretrained_weights", dest="pretrained_weights", help="Path to the Pretrained model", default=None, type="string")
     parser.add_option("--num_class", dest="num_class", help="number of the classes in the downstream task",
@@ -89,7 +90,6 @@ def get_args_parser():
 
     parser.add_option("--resume", dest="resume", help="whether latest checkpoint", default=False, action="callback",
                       callback=vararg_callback_bool)
-    parser.add_option("--reinit_heads", dest="reinit_heads", help="whether to reinitialize omni heads", default=False, action="callback", callback=vararg_callback_bool)
     parser.add_option("--workers", dest="workers", help="number of CPU workers", default=8, type="int")
     parser.add_option("--print_freq", dest="print_freq", help="print frequency", default=50, type="int")
     parser.add_option("--test_augment", dest="test_augment", help="whether use test time augmentation",
@@ -102,6 +102,24 @@ def get_args_parser():
                       default="LSR-Ones", type="string")
     parser.add_option("--unknown_label", dest="unknown_label", help="the label assigned to unknown data",
                       default=0, type="int")
+
+    # ---------------- unified 2D/3D (unified_swin_large_768) options ----------------
+    parser.add_option("--window_depth", dest="window_depth", help="depth of 3D attention windows", default=4, type="int")
+    parser.add_option("--patch_depth", dest="patch_depth", help="depth of the 3D patch embedding", default=4, type="int")
+    parser.add_option("--grad_checkpoint", dest="grad_checkpoint", help="gradient checkpointing in UnifiedSwin", default=True,
+                      action="callback", callback=vararg_callback_bool)
+    parser.add_option("--pretrained_key", dest="pretrained_key", help="checkpoint entry to load: auto|teacher|state_dict|model",
+                      default="auto", type="string")
+    parser.add_option("--pretrained_heads", dest="pretrained_heads",
+                      help="comma-separated dataset order of the omni_heads inside --pretrained_weights ('' = match by index)",
+                      default="MIMIC,CheXpert,ChestXray14,RSNAPneumonia,VinDrCXR,Shenzhen", type="string")
+    parser.add_option("--freeze_pretrained_epochs", dest="freeze_pretrained_epochs",
+                      help="first N epochs: train only new params (3D stem, dim embedding, new heads) on 3D datasets", default=0, type="int")
+    parser.add_option("--w_xdim", dest="w_xdim", help="weight of CT<->DRR cross-dimensional consistency", default=0.5, type="float")
+    parser.add_option("--amp", dest="amp", help="bf16 autocast in training", default=False, action="callback",
+                      callback=vararg_callback_bool)
+    parser.add_option("--reinit_heads", dest="reinit_heads", help="drop omni_heads when resuming (referenced by engine.py)",
+                      default=False, action="callback", callback=vararg_callback_bool)
 
 
     (options, args) = parser.parse_args()
@@ -124,14 +142,17 @@ def main(args):
     dataset_val_list = []
     dataset_test_list = []
     for dataset in args.dataset_list:
+        cfg = datasets_config[dataset]
+        loader_cls = dict_dataloarder[cfg.get('loader', dataset)]   # 'loader:' lets a config entry pick e.g. CTVolume
+        extra = cfg.get('dataset_kwargs', None) or {}               # only 3D entries define this; 2D classes get nothing new
         dataset_train_list.append(
-            dict_dataloarder[dataset](images_path=datasets_config[dataset]['data_dir'], file_path=datasets_config[dataset]['train_list'], crop_size=args.crop_size, resize=args.resize, augment=None)
+            loader_cls(images_path=cfg['data_dir'], file_path=cfg['train_list'], crop_size=args.crop_size, resize=args.resize, augment=None, **extra)
         )
         dataset_val_list.append(
-            dict_dataloarder[dataset](images_path=datasets_config[dataset]['data_dir'], file_path=datasets_config[dataset]['val_list'], crop_size=args.crop_size, resize=args.resize, augment=build_transform_classification(normalize=args.normalization, crop_size=args.crop_size, resize=args.resize, mode="valid"))
+            loader_cls(images_path=cfg['data_dir'], file_path=cfg['val_list'], crop_size=args.crop_size, resize=args.resize, augment=build_transform_classification(normalize=args.normalization, crop_size=args.crop_size, resize=args.resize, mode="valid"), **extra)
         )
         dataset_test_list.append(
-            dict_dataloarder[dataset](images_path=datasets_config[dataset]['data_dir'], file_path=datasets_config[dataset]['test_list'], crop_size=args.crop_size, resize=args.resize, augment=build_transform_classification(normalize=args.normalization, crop_size=args.crop_size, resize=args.resize, mode="test"))
+            loader_cls(images_path=cfg['data_dir'], file_path=cfg['test_list'], crop_size=args.crop_size, resize=args.resize, augment=build_transform_classification(normalize=args.normalization, crop_size=args.crop_size, resize=args.resize, mode="test"), **extra)
         )
 
     omni_engine(args, model_path, output_path, args.dataset_list, datasets_config, dataset_train_list, dataset_val_list, dataset_test_list)
@@ -139,4 +160,3 @@ def main(args):
 if __name__ == '__main__':
     args = get_args_parser()
     main(args)
-
