@@ -1,1 +1,15 @@
 .DS_Store
+
+# run outputs, checkpoints, containers
+__pycache__/
+*.pyc
+*.pth
+*.pth.tar
+*.sif
+*.npy
+*.npz
+*.zip
+*.bak_lrsched
+Models/
+Outputs/
+wandb/
