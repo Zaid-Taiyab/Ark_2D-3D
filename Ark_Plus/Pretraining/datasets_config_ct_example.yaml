@@ -1,0 +1,53 @@
+# Append to Ark_Plus/Pretraining/datasets_config.yaml (your existing 2D entries stay exactly as they are).
+# prep_ctrate.py prints this block with the exact 18 disease names from the CT-RATE label CSV and your
+# absolute paths; copy that printed version rather than this template.
+#
+# New optional keys (2D entries simply don't have them):
+#   loader          class in dict_dataloarder to use (default: the entry name)
+#   dims            3 for volumes (default 2)
+#   batch_size      per-dataset batch size (default: --batch_size); with DataParallel, a multiple of the GPU count
+#   accum_steps     gradient accumulation for this dataset (default 1)
+#   drr_head        true -> adds a DRR head + CT<->DRR consistency for this dataset
+#   dataset_kwargs  passed to the dataset constructor
+
+CTRATE:
+  loader: CTVolume
+  dims: 3
+  data_dir: /scratch/ztaiyab/data/CTRATE_ark
+  train_list: /scratch/ztaiyab/data/CTRATE_ark/lists/train.txt   # 95% of official-train patients
+  val_list: /scratch/ztaiyab/data/CTRATE_ark/lists/val.txt       # 5% of official-train patients
+  test_list: /scratch/ztaiyab/data/CTRATE_ark/lists/test.txt     # official CT-RATE validation set
+  diseases: [<printed by prep_ctrate.py>]
+  task_type: multi-label classification
+  batch_size: 8
+  accum_steps: 1
+  drr_head: true
+  dataset_kwargs:
+    # D,H,W fed to the network. Every stage's in-plane token count should be a multiple of the 2D window:
+    #   unified_swin_base (window 7): [128, 224, 224]   (low-memory: [64, 224, 224])
+    #   window-12 models:             [128, 192, 192]
+    volume_size: [128, 224, 224]
+    drr_dir: drr
+    drr_size: 224              # = --input_size (224 for unified_swin_base)
+    return_drr: true
+
+# ---------------------------------------------------------------------------------------------
+# RAD-ChestCT (public 3,630-scan release). prep_radchestct.py prints this block with your paths
+# and the abnormality list it kept; copy the printed version.
+RADChestCT:
+  loader: CTVolume
+  dims: 3
+  data_dir: /scratch/ztaiyab/data/RADChestCT_ark
+  train_list: /scratch/ztaiyab/data/RADChestCT_ark/lists/train.txt
+  val_list: /scratch/ztaiyab/data/RADChestCT_ark/lists/val.txt
+  test_list: /scratch/ztaiyab/data/RADChestCT_ark/lists/test.txt
+  diseases: [<printed by prep_radchestct.py>]
+  task_type: multi-label classification
+  batch_size: 8
+  accum_steps: 1
+  drr_head: true
+  dataset_kwargs:
+    volume_size: [128, 224, 224]
+    drr_dir: drr
+    drr_size: 224
+    return_drr: true
