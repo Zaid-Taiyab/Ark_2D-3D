@@ -89,6 +89,7 @@ def get_args_parser():
 
     parser.add_option("--resume", dest="resume", help="whether latest checkpoint", default=False, action="callback",
                       callback=vararg_callback_bool)
+    parser.add_option("--reinit_heads", dest="reinit_heads", help="whether to reinitialize omni heads", default=False, action="callback", callback=vararg_callback_bool)
     parser.add_option("--workers", dest="workers", help="number of CPU workers", default=8, type="int")
     parser.add_option("--print_freq", dest="print_freq", help="print frequency", default=50, type="int")
     parser.add_option("--test_augment", dest="test_augment", help="whether use test time augmentation",
