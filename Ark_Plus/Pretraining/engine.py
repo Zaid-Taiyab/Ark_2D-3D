@@ -22,6 +22,7 @@ from trainer import train_one_epoch, test_classification, evaluate
 from utils import cosine_anneal_schedule,dice,mean_dice_coef
 
 from timm.scheduler import create_scheduler
+from lr_schedule import WarmupCosineScheduler
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 
@@ -94,7 +95,8 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
         momentum_schedule = cosine_scheduler(args.momentum_teacher, 1,
                                                args.pretrain_epochs, iters_per_epoch)
     optimizer = create_optimizer(args, model)
-    lr_scheduler, _ = create_scheduler(args, optimizer)
+    lr_scheduler = WarmupCosineScheduler(optimizer, args.pretrain_epochs, args.warmup_epochs, args.warmup_lr, args.lr, args.min_lr)
+    print(lr_scheduler.describe())
 
     start_epoch = 0
     init_loss = 999999
@@ -157,6 +159,10 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
         it = start_epoch * len(dataset_list)
         
         for epoch in range(start_epoch, args.pretrain_epochs):
+            current_lr = lr_scheduler.step(epoch)
+            print('Epoch {:04d}: lr = {:.6g}'.format(epoch, current_lr))
+            with open(log_file, 'a') as _lr_log:
+                _lr_log.write('Epoch {:04d}: lr = {:.6g}\n'.format(epoch, current_lr))
             for i, data_loader in enumerate(data_loader_list_train): 
                 criterion = torch.nn.CrossEntropyLoss() if datasets_config[dataset_list[i]]['task_type'] == "multi-class classification" else torch.nn.BCEWithLogitsLoss()
                 train_one_epoch(model, i, dataset_list[i], data_loader, device, criterion, optimizer, epoch, args.ema_mode, teacher, momentum_schedule, it)
@@ -173,7 +179,7 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                 val_loss_metric = avg_val_loss
             else:
                 val_loss_metric = val_loss_list[dataset_list.index(args.val_loss_metric)]
-            lr_scheduler.step(epoch + 1, val_loss_metric)
+            pass  # lr is set at the start of each epoch by WarmupCosineScheduler (no val-loss dependence)
             
             # wandb.log({"avg_val_loss": avg_val_loss})
             
