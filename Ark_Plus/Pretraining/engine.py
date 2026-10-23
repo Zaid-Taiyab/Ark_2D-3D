@@ -106,13 +106,13 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
             resume = save_model_path + '.pth.tar'
             if os.path.isfile(resume):
                 print("=> loading checkpoint '{}'".format(resume))
-                checkpoint = torch.load(resume)
+                checkpoint = torch.load(resume, weights_only=False)
                 start_epoch = checkpoint['epoch']
                 init_loss = checkpoint['lossMIN']
                 state_dict = checkpoint['state_dict']
                 teacher_state_dict = checkpoint['teacher']
                 
-                if args.reinit_heads: 
+                if getattr(args, 'reinit_heads', False): 
                     for k in model.state_dict().keys():
                         if k.startswith('omni_heads.'):
                             print(f"Removing key {k} from pretrained checkpoint")
