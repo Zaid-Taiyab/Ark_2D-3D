@@ -173,7 +173,7 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                 val_loss_metric = avg_val_loss
             else:
                 val_loss_metric = val_loss_list[dataset_list.index(args.val_loss_metric)]
-            lr_scheduler.step(val_loss_metric)
+            lr_scheduler.step(epoch + 1, val_loss_metric)
             
             # wandb.log({"avg_val_loss": avg_val_loss})
             
