@@ -106,6 +106,10 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
         momentum_schedule = cosine_scheduler(args.momentum_teacher, 1,
                                                args.pretrain_epochs, iters_per_epoch)
     optimizer = create_optimizer(args, model)
+    optimizer_3d = (create_optimizer(args, model)   # own momentum buffer for CT steps in mixed 2D+3D runs
+                    if (args.lr_scale_3d != 1.0 and any(is_3d_list) and not all(is_3d_list)) else None)
+    if optimizer_3d is not None:
+        print('[modality optimizers] X-ray steps: optimizer (lr x1); CT steps: optimizer_3d (lr x{:g}), separate momentum'.format(args.lr_scale_3d))
     lr_scheduler = WarmupCosineScheduler(optimizer, args.pretrain_epochs, args.warmup_epochs, args.warmup_lr, args.lr, args.min_lr)
     print(lr_scheduler.describe())
 
@@ -148,6 +152,8 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                 teacher.load_state_dict(teacher_state_dict, strict=True)
                 lr_scheduler.load_state_dict(checkpoint['scheduler'])
                 optimizer.load_state_dict(checkpoint['optimizer'])
+                if optimizer_3d is not None and checkpoint.get('optimizer_3d'):
+                    optimizer_3d.load_state_dict(checkpoint['optimizer_3d'])
                 print("=> loaded checkpoint '{}' (epoch={:04d}, val_loss={})"
                         .format(resume, start_epoch, init_loss))
                 start_epoch += 1
@@ -195,9 +201,10 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                     it += 1   # keep the momentum schedule aligned; 2D datasets have nothing new to train yet
                     continue
                 criterion = torch.nn.CrossEntropyLoss() if datasets_config[dataset_list[i]]['task_type'] == "multi-class classification" else torch.nn.BCEWithLogitsLoss()
-                for _g in optimizer.param_groups:   # per-modality learning rate
+                _opt = optimizer_3d if (optimizer_3d is not None and is_3d_list[i]) else optimizer
+                for _g in _opt.param_groups:   # per-modality learning rate (and, in mixed runs, per-modality optimizer)
                     _g['lr'] = current_lr * (args.lr_scale_3d if is_3d_list[i] else 1.0)
-                train_one_epoch(model, i, dataset_list[i], data_loader, device, criterion, optimizer, epoch, args.ema_mode, teacher, momentum_schedule, it,
+                train_one_epoch(model, i, dataset_list[i], data_loader, device, criterion, _opt, epoch, args.ema_mode, teacher, momentum_schedule, it,
                                 drr_head_n=drr_head_index.get(i), w_xdim=args.w_xdim,
                                 accum_steps=datasets_config[dataset_list[i]].get('accum_steps', 1), use_amp=args.amp)
                 it += 1
@@ -230,6 +237,7 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                     'state_dict': model.state_dict(),
                     'teacher': teacher.state_dict(),
                     'optimizer': optimizer.state_dict(),
+                    'optimizer_3d': (optimizer_3d.state_dict() if optimizer_3d is not None else None),
                     'scheduler': lr_scheduler.state_dict(),
                     },  filename=save_model_path)
 
@@ -247,6 +255,7 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                      'state_dict': model.state_dict(),
                      'teacher': teacher.state_dict(),
                      'optimizer': optimizer.state_dict(),
+                     'optimizer_3d': (optimizer_3d.state_dict() if optimizer_3d is not None else None),
                      'scheduler': lr_scheduler.state_dict(),
                      },  filename=save_model_path+str(epoch))
                 with open(output_file, 'a') as writer:
