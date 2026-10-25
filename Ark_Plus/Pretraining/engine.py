@@ -184,6 +184,8 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
         for epoch in range(start_epoch, args.pretrain_epochs):
             current_lr = lr_scheduler.step(epoch)
             print('Epoch {:04d}: lr = {:.6g}'.format(epoch, current_lr))
+            if args.lr_scale_3d != 1.0 and any(is_3d_list):
+                print('Epoch {:04d}: lr for CT datasets = {:.6g} (x{:g})'.format(epoch, current_lr * args.lr_scale_3d, args.lr_scale_3d))
             with open(log_file, 'a') as _lr_log:
                 _lr_log.write('Epoch {:04d}: lr = {:.6g}\n'.format(epoch, current_lr))
             warmup_3d = epoch < args.freeze_pretrained_epochs
@@ -193,6 +195,8 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                     it += 1   # keep the momentum schedule aligned; 2D datasets have nothing new to train yet
                     continue
                 criterion = torch.nn.CrossEntropyLoss() if datasets_config[dataset_list[i]]['task_type'] == "multi-class classification" else torch.nn.BCEWithLogitsLoss()
+                for _g in optimizer.param_groups:   # per-modality learning rate
+                    _g['lr'] = current_lr * (args.lr_scale_3d if is_3d_list[i] else 1.0)
                 train_one_epoch(model, i, dataset_list[i], data_loader, device, criterion, optimizer, epoch, args.ema_mode, teacher, momentum_schedule, it,
                                 drr_head_n=drr_head_index.get(i), w_xdim=args.w_xdim,
                                 accum_steps=datasets_config[dataset_list[i]].get('accum_steps', 1), use_amp=args.amp)
@@ -204,6 +208,12 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                 val_loss_list.append(val_loss)
                 # wandb.log({"val_loss_{}".format(dataset_list[i]): val_loss})
             
+            if not np.all(np.isfinite(val_loss_list)):   # NaN guard: stop before overwriting the last good checkpoint
+                _msg = 'STOPPED at epoch {:04d}: non-finite validation loss {} for {} (training diverged; last good checkpoint kept)'.format(epoch, val_loss_list, dataset_list)
+                print(_msg)
+                with open(log_file, 'a') as _log:
+                    _log.write(_msg + '\n')
+                raise RuntimeError(_msg)
             avg_val_loss = np.average(val_loss_list)
             if args.val_loss_metric == "average":
                 val_loss_metric = avg_val_loss
