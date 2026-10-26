@@ -117,6 +117,9 @@ def get_args_parser():
                       help="first N epochs: train only new params (3D stem, dim embedding, new heads) on 3D datasets", default=0, type="int")
     parser.add_option("--w_xdim", dest="w_xdim", help="weight of CT<->DRR cross-dimensional consistency", default=0.5, type="float")
     parser.add_option("--lr_scale_3d", dest="lr_scale_3d", help="CT datasets train at this multiple of the scheduled lr (X-rays at 1x)", default=1.0, type="float")
+    parser.add_option("--clip_grad_3d", dest="clip_grad_3d", help="mixed 2D+3D runs: clip the gradient norm of CT updates to this value (0 = off)", default=0.0, type="float")
+    parser.add_option("--interleave", dest="interleave", help="mixed 2D+3D runs: interleave the datasets\' batches through each epoch instead of one dataset after another", default=False, action="callback",
+                      callback=vararg_callback_bool)
     parser.add_option("--amp", dest="amp", help="bf16 autocast in training", default=False, action="callback",
                       callback=vararg_callback_bool)
     parser.add_option("--reinit_heads", dest="reinit_heads", help="drop omni_heads when resuming (referenced by engine.py)",

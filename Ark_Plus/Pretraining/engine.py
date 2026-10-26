@@ -17,7 +17,7 @@ import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 #from torch.optim.lr_scheduler import ReduceLROnPlateau
-from trainer import train_one_epoch, test_classification, evaluate
+from trainer import train_one_epoch, test_classification, evaluate, train_one_epoch_interleaved
 #import segmentation_models_pytorch as smp
 from utils import cosine_anneal_schedule,dice,mean_dice_coef
 
@@ -110,6 +110,17 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                     if (args.lr_scale_3d != 1.0 and any(is_3d_list) and not all(is_3d_list)) else None)
     if optimizer_3d is not None:
         print('[modality optimizers] X-ray steps: optimizer (lr x1); CT steps: optimizer_3d (lr x{:g}), separate momentum'.format(args.lr_scale_3d))
+    _ct_clip = {'n': 0, 'clipped': 0, 'norms': []}
+    if optimizer_3d is not None and args.clip_grad_3d > 0:   # clip CT update spikes
+        _ct_step = optimizer_3d.step
+        def _ct_clipped_step(*a, **k):
+            _nrm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_3d))
+            _ct_clip['n'] += 1
+            _ct_clip['norms'].append(_nrm)
+            _ct_clip['clipped'] += int(_nrm > args.clip_grad_3d)
+            return _ct_step(*a, **k)
+        optimizer_3d.step = _ct_clipped_step
+        print('[modality optimizers] CT updates: gradient norm clipped to {:g}'.format(args.clip_grad_3d))
     lr_scheduler = WarmupCosineScheduler(optimizer, args.pretrain_epochs, args.warmup_epochs, args.warmup_lr, args.lr, args.min_lr)
     print(lr_scheduler.describe())
 
@@ -196,7 +207,23 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                 _lr_log.write('Epoch {:04d}: lr = {:.6g}\n'.format(epoch, current_lr))
             warmup_3d = epoch < args.freeze_pretrained_epochs
             set_pretrained_frozen(warmup_3d)
-            for i, data_loader in enumerate(data_loader_list_train): 
+            _interleave = bool(getattr(args, 'interleave', False)) and any(is_3d_list) and not all(is_3d_list) and not warmup_3d
+            if _interleave:   # mixed 2D+3D: batches of all datasets interleaved through the epoch
+                _tasks = []
+                for _k, _dl in enumerate(data_loader_list_train):
+                    if datasets_config[dataset_list[_k]].get('accum_steps', 1) != 1:
+                        raise RuntimeError('--interleave supports accum_steps 1 only ({})'.format(dataset_list[_k]))
+                    _o = optimizer_3d if (optimizer_3d is not None and is_3d_list[_k]) else optimizer
+                    for _g in _o.param_groups:
+                        _g['lr'] = current_lr * (args.lr_scale_3d if is_3d_list[_k] else 1.0)
+                    _crit = torch.nn.CrossEntropyLoss() if datasets_config[dataset_list[_k]]['task_type'] == 'multi-class classification' else torch.nn.BCEWithLogitsLoss()
+                    _tasks.append(dict(head=_k, name=dataset_list[_k], loader=_dl, criterion=_crit, optimizer=_o, drr_head_n=drr_head_index.get(_k)))
+                if epoch == start_epoch:
+                    print('[interleave] mixing {} batches per epoch: {}'.format(sum(len(t['loader']) for t in _tasks), {t['name']: len(t['loader']) for t in _tasks}))
+                train_one_epoch_interleaved(model, _tasks, device, epoch, args.ema_mode, teacher, momentum_schedule, it,
+                                            w_xdim=args.w_xdim, use_amp=args.amp)
+                it += len(dataset_list)
+            for i, data_loader in enumerate([] if _interleave else data_loader_list_train):
                 if warmup_3d and not is_3d_list[i]:
                     it += 1   # keep the momentum schedule aligned; 2D datasets have nothing new to train yet
                     continue
@@ -208,6 +235,13 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                                 drr_head_n=drr_head_index.get(i), w_xdim=args.w_xdim,
                                 accum_steps=datasets_config[dataset_list[i]].get('accum_steps', 1), use_amp=args.amp)
                 it += 1
+            if _ct_clip['n']:
+                _m = 'Epoch {:04d}: CT grad norm median {:.3g}, max {:.3g}; clipped {}/{} CT steps (max_norm {:g})'.format(
+                    epoch, float(np.median(_ct_clip['norms'])), max(_ct_clip['norms']), _ct_clip['clipped'], _ct_clip['n'], args.clip_grad_3d)
+                print(_m)
+                with open(log_file, 'a') as _log:
+                    _log.write(_m + '\n')
+                _ct_clip.update(n=0, clipped=0, norms=[])
             val_loss_list = []
             for i, dv in enumerate(data_loader_list_val):
                 criterion = torch.nn.CrossEntropyLoss() if datasets_config[dataset_list[i]]['task_type'] == "multi-class classification" else torch.nn.BCEWithLogitsLoss()

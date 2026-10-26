@@ -90,6 +90,72 @@ def train_one_epoch(model, use_head_n, dataset, data_loader_train, device, crite
         wandb.log({"train_loss_mse_{}".format(dataset): losses_mse.avg})
 
 
+def train_one_epoch_interleaved(model, tasks, device, epoch, ema_mode, teacher, momentum_schedule, it,
+                                w_xdim=0.5, use_amp=False):
+    """Mixed 2D+3D training with the datasets' batches interleaved through the epoch in proportion to their
+    sizes (each dataset still sees each of its batches once). tasks: list of dicts with keys
+    head, name, loader, criterion, optimizer, drr_head_n. Per batch: the same loss as train_one_epoch
+    (classification + teacher consistency [+ DRR terms]), one optimizer step (accum_steps 1).
+    Teacher EMA as in the cyclic schedule: one update per dataset at the end of the epoch, momentum[it + k]."""
+    assert ema_mode == "epoch", "--interleave supports --ema_mode epoch only"
+    MSE = torch.nn.MSELoss()
+    model.train()
+    n = [len(t["loader"]) for t in tasks]
+    done = [0] * len(tasks)
+    iters = [iter(t["loader"]) for t in tasks]
+    coffs = [(momentum_schedule[it + k] - 0.9) * 5 for k in range(len(tasks))]
+    meters = []
+    for t, nk in zip(tasks, n):
+        bt = MetricLogger('Time', ':6.3f')
+        lc = MetricLogger('Loss_' + t["name"] + ' cls', ':.4e')
+        lm = MetricLogger('Loss_' + t["name"] + ' mse', ':.4e')
+        ms, lx = [bt, lc, lm], None
+        if t["drr_head_n"] is not None:
+            lx = MetricLogger('Loss_' + t["name"] + ' xdim', ':.4e')
+            ms.append(lx)
+        meters.append((bt, lc, lm, lx, ProgressLogger(nk, ms, prefix="Epoch: [{}]".format(epoch))))
+    end = time.time()
+    for _ in range(sum(n)):
+        # next batch comes from the dataset that is furthest behind its share of the epoch
+        k = min((j for j in range(len(tasks)) if done[j] < n[j]), key=lambda j: (done[j] + 0.5) / n[j])
+        t = tasks[k]
+        bt, lc, lm, lx, progress = meters[k]
+        batch = next(iters[k])
+        samples1, samples2, targets = batch[0].float().to(device), batch[1].float().to(device), batch[2].float().to(device)
+        use_drr = t["drr_head_n"] is not None and len(batch) > 3
+        coff = coffs[k]
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            with torch.no_grad():
+                feat_t, pred_t = teacher(samples2, t["head"])
+            feat_s, pred_s = model(samples1, t["head"])
+            loss_cls = t["criterion"](pred_s.float(), targets)
+            loss_const = MSE(feat_s.float(), feat_t.float())
+            loss = (1 - coff) * loss_cls + coff * loss_const
+            if use_drr:
+                drr = batch[3].float().to(device)
+                with torch.no_grad():
+                    feat_dt, _ = teacher(drr, t["drr_head_n"])
+                feat_ds, pred_ds = model(drr, t["drr_head_n"])
+                loss_drr_cls = t["criterion"](pred_ds.float(), targets)
+                loss_drr_const = MSE(feat_ds.float(), feat_dt.float())
+                loss_xdim = MSE(feat_s.float(), feat_dt.float()) + MSE(feat_ds.float(), feat_t.float())
+                loss = loss + (1 - coff) * loss_drr_cls + coff * (loss_drr_const + w_xdim * loss_xdim)
+        t["optimizer"].zero_grad()
+        loss.backward()
+        t["optimizer"].step()
+        lc.update(loss_cls.item(), samples1.size(0))
+        lm.update(loss_const.item(), samples1.size(0))
+        if use_drr:
+            lx.update(loss_xdim.item(), samples1.size(0))
+        bt.update(time.time() - end)
+        end = time.time()
+        if done[k] % 50 == 0:
+            progress.display(done[k])
+        done[k] += 1
+    for k in range(len(tasks)):
+        ema_update_teacher(model, teacher, momentum_schedule, it + k)
+
+
 def ema_update_teacher(model, teacher, momentum_schedule, it):
     with torch.no_grad():
         m = momentum_schedule[it]  # momentum parameter
