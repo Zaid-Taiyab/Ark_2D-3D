@@ -111,15 +111,16 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
     if optimizer_3d is not None:
         print('[modality optimizers] X-ray steps: optimizer (lr x1); CT steps: optimizer_3d (lr x{:g}), separate momentum'.format(args.lr_scale_3d))
     _ct_clip = {'n': 0, 'clipped': 0, 'norms': []}
-    if optimizer_3d is not None and args.clip_grad_3d > 0:   # clip CT update spikes
-        _ct_step = optimizer_3d.step
+    _ct_opt = optimizer_3d if optimizer_3d is not None else (optimizer if all(is_3d_list) else None)   # CT-only runs: the one optimizer
+    if _ct_opt is not None and args.clip_grad_3d > 0:   # clip CT updates
+        _ct_step = _ct_opt.step
         def _ct_clipped_step(*a, **k):
             _nrm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_3d))
             _ct_clip['n'] += 1
             _ct_clip['norms'].append(_nrm)
             _ct_clip['clipped'] += int(_nrm > args.clip_grad_3d)
             return _ct_step(*a, **k)
-        optimizer_3d.step = _ct_clipped_step
+        _ct_opt.step = _ct_clipped_step
         print('[modality optimizers] CT updates: gradient norm clipped to {:g}'.format(args.clip_grad_3d))
     lr_scheduler = WarmupCosineScheduler(optimizer, args.pretrain_epochs, args.warmup_epochs, args.warmup_lr, args.lr, args.min_lr)
     print(lr_scheduler.describe())
