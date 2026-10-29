@@ -1,7 +1,7 @@
 """
 unified_swin.py 
 -------------------------------------------------
-Swin-L that accepts 2D CXRs (B,3,H,W) and 3D CTs (B,1,D,H,W) with fully shared transformer
+Swin-B that accepts 2D CXRs (B,3,H,W) and 3D CTs (B,1,D,H,W) with fully shared transformer
 weights, plus ArkUnifiedSwin: a drop-in replacement for models.ArkSwinTransformer with the
 same attribute names (projector, omni_heads) and the same forward(x, head_n) API, so engine.py,
 trainer.py, EMA and checkpoint saving work unchanged.
