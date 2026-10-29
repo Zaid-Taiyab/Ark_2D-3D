@@ -1,5 +1,5 @@
 """
-unified_swin.py  (place in Ark_Plus/Pretraining/)
+unified_swin.py 
 -------------------------------------------------
 Swin-L that accepts 2D CXRs (B,3,H,W) and 3D CTs (B,1,D,H,W) with fully shared transformer
 weights, plus ArkUnifiedSwin: a drop-in replacement for models.ArkSwinTransformer with the
