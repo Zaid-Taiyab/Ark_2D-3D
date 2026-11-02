@@ -236,6 +236,25 @@ def omni_engine(args, model_path, output_path, dataset_list, datasets_config, da
                                 drr_head_n=drr_head_index.get(i), w_xdim=args.w_xdim,
                                 accum_steps=datasets_config[dataset_list[i]].get('accum_steps', 1), use_amp=args.amp)
                 it += 1
+                if getattr(args, 'focus_eval', False) and (epoch % args.test_epoch == 0 or epoch + 1 == args.pretrain_epochs):
+                    _focus_file = os.path.join(output_path, exp + "_" + args.exp_name + "_focus.csv")
+                    _new_file = not os.path.exists(_focus_file)
+                    with open(_focus_file, 'a') as _ff:
+                        if _new_file:
+                            _ff.write("epoch,after_phase,eval_dataset,state,student_mAUC,teacher_mAUC\n")
+                        for _j, _ds in enumerate(dataset_list):
+                            _mc = datasets_config[_ds]['task_type'] == "multi-class classification"
+                            _ys, _ps = test_classification(model, _j, data_loader_list_test[_j], device, _mc, is_3d=is_3d_list[_j])
+                            _yt, _pt = test_classification(teacher, _j, data_loader_list_test[_j], device, _mc, is_3d=is_3d_list[_j])
+                            if _ds == "CheXpert":
+                                _dis = datasets_config[_ds]['diseases']
+                                _idx = [_dis.index(c) for c in datasets_config['CheXpert']['test_diseases_name']]
+                                _ys, _ps, _yt, _pt = _ys[:, _idx], _ps[:, _idx], _yt[:, _idx], _pt[:, _idx]
+                            _s = float(np.mean(metric_AUROC(_ys, _ps, _ys.shape[1])))
+                            _t = float(np.mean(metric_AUROC(_yt, _pt, _yt.shape[1])))
+                            _ff.write("{},{},{},{},{:.4f},{:.4f}\n".format(epoch, dataset_list[i], _ds, "focused" if _j == i else "unfocused", _s, _t))
+                    print("[focus_eval] epoch {:04d}: tested all datasets after the {} phase".format(epoch, dataset_list[i]))
+                    model.train()
             if _ct_clip['n']:
                 _m = 'Epoch {:04d}: CT grad norm median {:.3g}, max {:.3g}; clipped {}/{} CT steps (max_norm {:g})'.format(
                     epoch, float(np.median(_ct_clip['norms'])), max(_ct_clip['norms']), _ct_clip['clipped'], _ct_clip['n'], args.clip_grad_3d)
