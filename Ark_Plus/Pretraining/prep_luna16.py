@@ -1,5 +1,5 @@
 """
-prep_luna16.py  (place in Ark_Plus/Pretraining/; needs numpy, scipy, cv2, pandas; no GPU, no SimpleITK)
+prep_luna16.py  (place in Ark_Plus/Pretraining/; needs only numpy, scipy, cv2; no GPU, no SimpleITK, no pandas)
 
 One-time LUNA16 preprocessing for Ark+ unified 2D/3D training. Same outputs as prep_ctrate.py:
   <out>/volumes/<seriesuid>.npy   uint8, HU window [-1000, 400], fixed 360 mm field of view (160x256x256)
@@ -22,13 +22,23 @@ import sys
 import traceback
 from multiprocessing import Pool
 
+import csv
+from collections import defaultdict
+
 import cv2
 import numpy as np
-import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ct_utils import window_uint8, preview_panel  # noqa: E402
-from prep_ctrate import process_hu  # noqa: E402
+from ct_utils import window_uint8, preview_panel, resample, center_fit, make_drr  # noqa: E402
+
+
+def process_hu(hu, spacing, cfg):
+    """Resample to the fixed field of view, centre-fit to cfg.shape, and make the DRR (numpy/scipy/cv2 only)."""
+    target = tuple(f / s for f, s in zip(cfg.fov, cfg.shape))
+    fixed = center_fit(resample(hu, spacing, target), cfg.shape, fill=-1024.0)
+    drr = make_drr(fixed, size=cfg.drr_px, spacing_zx=(target[0], target[2]))
+    return fixed, drr, target
+
 
 CFG = None
 MET_DTYPES = {"MET_SHORT": "i2", "MET_USHORT": "u2", "MET_FLOAT": "f4", "MET_DOUBLE": "f8",
@@ -76,19 +86,19 @@ def to_ras_zyx(arr, tm):
 
 # --------------------------------------------------------------------------- labels / splits
 def load_labels(ann_path, uids, thresholds):
-    ann = pd.read_csv(ann_path)
+    with open(ann_path, newline="") as f:
+        rows = list(csv.DictReader(f))
     for c in ("seriesuid", "diameter_mm"):
-        if c not in ann.columns:
-            raise KeyError(f"{ann_path} has no column '{c}' (columns: {list(ann.columns)})")
-    max_d = ann.groupby("seriesuid")["diameter_mm"].max()
+        if not rows or c not in rows[0]:
+            raise KeyError(f"{ann_path} has no column '{c}' (columns: {list(rows[0]) if rows else []})")
+    max_d = defaultdict(float)
+    for r in rows:
+        max_d[r["seriesuid"]] = max(max_d[r["seriesuid"]], float(r["diameter_mm"]))
     names = ["nodule_any" if t <= 0 else f"nodule_ge{t:g}mm" for t in thresholds]
-    labels = {}
-    for u in uids:
-        d = float(max_d.get(u, 0.0))
-        labels[u] = [int(u in max_d.index and d >= t) for t in thresholds]
+    labels = {u: [int(u in max_d and max_d[u] >= t) for t in thresholds] for u in uids}
     pos = np.array(list(labels.values())).sum(0)
-    print(f"[labels] {len(ann)} nodules in {ann['seriesuid'].nunique()} scans; "
-          f"{len(set(ann['seriesuid']) - set(uids))} annotated uids have no .mhd here")
+    print(f"[labels] {len(rows)} nodules in {len(max_d)} scans; "
+          f"{len(set(max_d) - set(uids))} annotated uids have no .mhd here")
     print("[labels] positives over all scans:", ", ".join(f"{n}={int(p)}" for n, p in zip(names, pos)))
     return labels, names
 
@@ -190,7 +200,7 @@ def main():
     p.add_argument("--inspect", type=int, default=0)
     p.add_argument("--workers", type=int, default=16)
     p.add_argument("--thresholds", default="0,6,10", help="nodule diameter thresholds (mm) -> one label each")
-    p.add_argument("--splits", default="0-6:train,7:val,8-9:test", help="subset index -> split")
+    p.add_argument("--splits", default="0-6:train,7:val,8-9:test", help="subset -> split, e.g. 0-4:train,5-6:val,7-9:test")
     p.add_argument("--extra_flips", default="", help="additional flips if the previews look wrong, any of 'zyx'")
     p.add_argument("--fov", default="360,360,360")
     p.add_argument("--shape", default="160,256,256")
@@ -212,6 +222,9 @@ def main():
                 mhd[uid] = os.path.join(dirpath, f)
                 subset_of[uid] = int(m.group(1)) if m else -1
     print(f"[files] {len(mhd)} .mhd scans under {cfg.root}")
+    if not mhd:
+        sys.exit(f"ERROR: no .mhd files readable under {cfg.root}. Inside a container, bind this path "
+                 "(and the real location behind any symlink) with --bind.")
     uids = sorted(mhd)
     labels, names = load_labels(cfg.annotations, uids, [float(t) for t in cfg.thresholds.split(",")])
     split_map = parse_splits(cfg.splits)

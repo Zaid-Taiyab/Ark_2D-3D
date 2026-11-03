@@ -1,0 +1,38 @@
+
+# ======================= 3D CT datasets (append to datasets_config.yaml) =======================
+# drr_head / return_drr are FALSE: pure 3D baselines. Set both to true only for the 2D+3D runs.
+LUNA16:
+  loader: CTVolume
+  dims: 3
+  data_dir: /scratch/ztaiyab/data/LUNA16_ark
+  train_list: /scratch/ztaiyab/data/LUNA16_ark/lists/train.txt
+  val_list: /scratch/ztaiyab/data/LUNA16_ark/lists/val.txt
+  test_list: /scratch/ztaiyab/data/LUNA16_ark/lists/test.txt
+  diseases: ['nodule_any', 'nodule_ge6mm', 'nodule_ge10mm']
+  task_type: multi-label classification
+  batch_size: 8
+  accum_steps: 1
+  drr_head: false
+  dataset_kwargs:
+    volume_size: [128, 224, 224]
+    drr_dir: drr
+    drr_size: 224
+    return_drr: false
+
+RICORD:
+  loader: CTVolume
+  dims: 3
+  data_dir: /scratch/ztaiyab/data/RICORD_ark
+  train_list: /scratch/ztaiyab/data/RICORD_ark/lists/train.txt
+  val_list: /scratch/ztaiyab/data/RICORD_ark/lists/val.txt
+  test_list: /scratch/ztaiyab/data/RICORD_ark/lists/test.txt
+  diseases: ['COVID-19']
+  task_type: binary classification
+  batch_size: 8
+  accum_steps: 1
+  drr_head: false
+  dataset_kwargs:
+    volume_size: [128, 224, 224]
+    drr_dir: drr
+    drr_size: 224
+    return_drr: false
