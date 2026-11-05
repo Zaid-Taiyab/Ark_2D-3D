@@ -100,7 +100,7 @@ def shift_mask(Dp, Hp, Wp, win, shift, device):
 
 # -------------------------------------------------------------- switchable patch embed
 class SwitchablePatchEmbed(nn.Module):
-    def __init__(self, embed_dim=192, patch2d=4, patch3d=(4, 4, 4), in_ch2d=3, in_ch3d=1):
+    def __init__(self, embed_dim=128, patch2d=4, patch3d=(4, 4, 4), in_ch2d=3, in_ch3d=1):
         super().__init__()
         assert patch3d[1] == patch3d[2] == patch2d, "keep the in-plane 3D patch equal to the 2D patch"
         self.patch2d, self.patch3d = patch2d, tuple(patch3d)
@@ -231,8 +231,8 @@ class Stage(nn.Module):
 
 
 class UnifiedSwin(nn.Module):
-    def __init__(self, embed_dim=192, depths=(2, 2, 18, 2), heads=(6, 12, 24, 48),
-                 window2d=12, window_depth=4, patch3d=(4, 4, 4),
+    def __init__(self, embed_dim=128, depths=(2, 2, 18, 2), heads=(4, 8, 16, 32),
+                 window2d=7, window_depth=4, patch3d=(4, 4, 4),
                  merge_depth_3d=(True, True, True), drop_path_rate=0.1, use_checkpoint=True):
         super().__init__()
         self.patch_embed = SwitchablePatchEmbed(embed_dim, 4, patch3d)
@@ -245,7 +245,7 @@ class UnifiedSwin(nn.Module):
                 embed_dim * 2 ** i, d, heads[i], window, dpr[sum(depths[:i]):sum(depths[:i + 1])],
                 downsample=not last, merge_depth_3d=(False if last else merge_depth_3d[i]),
                 use_ckpt=use_checkpoint))
-        self.num_features = embed_dim * 2 ** (len(depths) - 1)      # 1536 for Swin-L
+        self.num_features = embed_dim * 2 ** (len(depths) - 1)      # 1024 for Swin-B (1536 for Swin-L)
         self.norm = nn.LayerNorm(self.num_features)
 
     def forward_features(self, x):
