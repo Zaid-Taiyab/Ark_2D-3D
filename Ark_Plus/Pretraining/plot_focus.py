@@ -1,61 +1,91 @@
 """
-plot_focus.py -- plot focused vs unfocused test mAUC from a run's *_focus.csv (written with --focus_eval True).
-  python plot_focus.py RUN_DIR [--out PREFIX] [--no_student]
-Focused = tested right after that dataset's own phase; unfocused = tested right after another dataset's phase.
-Writes PREFIX_focus.png/.pdf (one panel per dataset + a panel with the focused - unfocused gap) and prints a table.
+plot_focus.py -- focused vs unfocused test mAUC from a run's *_focus.csv (written with --focus_eval True).
+
+  python plot_focus.py RUN_DIR [--out PREFIX] [--zoom_from 50] [--title "..."]
+
+2 x N grid: teacher on the top row, student on the bottom row, one column per dataset.
+Focused = solid line, unfocused = dashed line. Two figures are written:
+  PREFIX_focus.png / .pdf        the whole run (y-axis scaled from epoch 10)
+  PREFIX_focus_zoom.png / .pdf   from --zoom_from onward, y-axis fitted tightly to the data
+and a summary table is printed.
 """
-import argparse, csv, glob, os
+import argparse
+import csv
+import glob
+import os
 from collections import defaultdict
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+NAMES = {"VinDrCXR": "VinDr-CXR", "ChestXray14": "ChestX-ray14"}
+
 p = argparse.ArgumentParser()
 p.add_argument("run_dir")
 p.add_argument("--out", default="")
-p.add_argument("--no_student", action="store_true")
+p.add_argument("--zoom_from", type=int, default=50, help="first epoch of the zoomed figure")
+p.add_argument("--title", default="Focused vs unfocused test mAUC")
 a = p.parse_args()
+
 files = glob.glob(os.path.join(a.run_dir, "Outputs", "*", "*_focus.csv")) + glob.glob(os.path.join(a.run_dir, "*_focus.csv"))
 if not files:
     raise SystemExit(f"no *_focus.csv under {a.run_dir} (was the run started with --focus_eval True?)")
-d = defaultdict(dict)   # (dataset, state) -> epoch -> (student, teacher)
+d = defaultdict(dict)   # (dataset, state) -> epoch -> {"student": x, "teacher": y}
 for r in csv.DictReader(open(files[0])):
-    d[(r["eval_dataset"], r["state"])][int(r["epoch"])] = (float(r["student_mAUC"]), float(r["teacher_mAUC"]))
-names = sorted({k[0] for k in d})
+    d[(r["eval_dataset"], r["state"])][int(r["epoch"])] = {"student": float(r["student_mAUC"]),
+                                                           "teacher": float(r["teacher_mAUC"])}
+datasets = sorted({k[0] for k in d}, key=lambda s: (s != "VinDrCXR", s))
 out = a.out or os.path.join(a.run_dir, os.path.basename(os.path.normpath(a.run_dir)))
-fig, axes = plt.subplots(1, len(names) + 1, figsize=(5.6 * (len(names) + 1), 4.4), squeeze=False)
-rows = []
-for k, ds in enumerate(names):
-    ax = axes[0][k]
-    for state, c in (("focused", "tab:green"), ("unfocused", "tab:orange")):
-        e = sorted(d[(ds, state)])
-        if not e:
-            continue
-        ax.plot(e, [d[(ds, state)][x][1] for x in e], "-o", ms=3, lw=2, color=c, label=f"{state} (teacher)")
-        if not a.no_student:
-            ax.plot(e, [d[(ds, state)][x][0] for x in e], "--", lw=1, color=c, alpha=0.7, label=f"{state} (student)")
-    common = sorted(set(d[(ds, "focused")]) & set(d[(ds, "unfocused")]))
-    gap_t = [d[(ds, "focused")][x][1] - d[(ds, "unfocused")][x][1] for x in common]
-    axes[0][-1].plot(common, gap_t, "-o", ms=3, lw=2, label=f"{ds} (teacher)")
-    if not a.no_student:
-        gap_s = [d[(ds, "focused")][x][0] - d[(ds, "unfocused")][x][0] for x in common]
-        axes[0][-1].plot(common, gap_s, "--", lw=1, label=f"{ds} (student)")
-    if common:
-        last = common[-1]
-        rows.append((ds, last, d[(ds, "focused")][last], d[(ds, "unfocused")][last]))
-    vals = [v for st in ("focused", "unfocused") for x in d[(ds, st)] if x > 0 for v in d[(ds, st)][x]]
-    if vals:
-        ax.set_ylim(max(0.5, min(vals) - 0.03), min(1.0, max(vals) + 0.02))
-    ax.set_title(f"{ds}: test mAUC, focused vs unfocused", fontsize=10)
-    ax.set_xlabel("epoch"); ax.set_ylabel("test mAUC"); ax.grid(alpha=0.3); ax.legend(fontsize=8, loc="lower right")
-g = axes[0][-1]
-g.axhline(0, color="grey", lw=1)
-g.set_title("Gap: focused minus unfocused", fontsize=10); g.set_xlabel("epoch"); g.set_ylabel("mAUC difference")
-g.grid(alpha=0.3); g.legend(fontsize=8)
-fig.tight_layout()
-for ext in ("png", "pdf"):
-    fig.savefig(f"{out}_focus.{ext}", dpi=160)
-print(f"{'dataset':12s} {'epoch':>5s}  focused T/S        unfocused T/S      gap (teacher)")
-for ds, e, (fs, ft), (us, ut) in rows:
-    print(f"{ds:12s} {e:5d}  {ft:.4f} / {fs:.4f}    {ut:.4f} / {us:.4f}    {ft - ut:+.4f}")
-print("saved:", f"{out}_focus.png", "(+ .pdf)")
+
+
+def figure(first_epoch, zoom, suffix, title):
+    fig, axes = plt.subplots(2, len(datasets), figsize=(5.5 * len(datasets), 8), squeeze=False)
+    for r_i, who in enumerate(("teacher", "student")):
+        for c_i, ds in enumerate(datasets):
+            ax = axes[r_i][c_i]
+            foc, unf = d[(ds, "focused")], d[(ds, "unfocused")]
+            ef = [e for e in sorted(foc) if e >= first_epoch]
+            eu = [e for e in sorted(unf) if e >= first_epoch]
+            ax.plot(ef, [foc[e][who] for e in ef], "-", color="tab:blue", lw=1.8, label="focused")
+            ax.plot(eu, [unf[e][who] for e in eu], "--", color="tab:orange", lw=1.5, label="unfocused")
+            if zoom:
+                vals = [foc[e][who] for e in ef] + [unf[e][who] for e in eu]
+                if vals:
+                    lo, hi = min(vals), max(vals)
+                    pad = max(0.001, (hi - lo) * 0.15)
+                    ax.set_ylim(lo - pad, hi + pad)
+                    ax.set_xlim(first_epoch - 3, max(ef + eu) + 3)
+            else:
+                vals = [foc[e][who] for e in ef if e >= 10] + [unf[e][who] for e in eu if e >= 10]
+                if vals:
+                    ax.set_ylim(max(0.5, min(vals) - 0.02), min(1.0, max(vals) + 0.015))
+            ax.set_title(f"{NAMES.get(ds, ds)}: {who}" + (f" (epochs {first_epoch}+)" if zoom else ""), fontsize=10)
+            ax.set_xlabel("epoch")
+            ax.set_ylabel("test mAUC")
+            ax.grid(alpha=0.3)
+            ax.legend(fontsize=8, loc="lower right")
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    for ext in ("png", "pdf"):
+        fig.savefig(f"{out}_{suffix}.{ext}", dpi=160)
+    plt.close(fig)
+    return f"{out}_{suffix}.png"
+
+
+saved = [figure(0, False, "focus", a.title),
+         figure(a.zoom_from, True, "focus_zoom", (a.title + f", zoomed (epochs {a.zoom_from}+)") if a.title else "")]
+
+print(f"{'model':8s} {'dataset':12s} {'epoch':>5s}  {'focused':>8s}  {'unfocused':>9s}  mean difference (last test epochs)")
+for who in ("teacher", "student"):
+    for ds in datasets:
+        foc, unf = d[(ds, "focused")], d[(ds, "unfocused")]
+        common = sorted(set(foc) & set(unf))
+        if common:
+            late = common[-5:]
+            g = sum(foc[e][who] - unf[e][who] for e in late) / len(late)
+            print(f"{who:8s} {NAMES.get(ds, ds):12s} {common[-1]:5d}  {foc[common[-1]][who]:8.4f}  "
+                  f"{unf[common[-1]][who]:9.4f}  {g:+.4f} (last {len(late)})")
+for s in saved:
+    print("saved:", s, "(+ .pdf)")

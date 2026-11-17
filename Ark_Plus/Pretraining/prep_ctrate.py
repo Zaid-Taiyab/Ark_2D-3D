@@ -1,5 +1,5 @@
 """
-prep_ctrate.py  (place in Ark_Plus/Pretraining/; needs numpy, scipy, cv2, nibabel, pandas; no GPU)
+prep_ctrate.py  (place in Ark_Plus/Pretraining/; needs numpy, scipy, cv2, nibabel; no pandas, no GPU)
 
 One-time CT-RATE preprocessing for Ark+ unified 2D/3D training. Per volume it
   1. reads the array and converts to HU (header scaling if present, else RescaleSlope/Intercept from
@@ -23,9 +23,11 @@ import sys
 import traceback
 from multiprocessing import Pool
 
+import csv
+import json
+
 import cv2
 import numpy as np
-import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ct_utils import resample, center_fit, window_uint8, make_drr, preview_panel  # noqa: E402
@@ -56,11 +58,17 @@ def parse_xy(v):
     return float(nums[0]), float(nums[1] if len(nums) > 1 else nums[0])
 
 
-def col(df, *names):
+def _read_csv(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def col(rows, *names):
+    cols = list(rows[0].keys()) if rows else []
     for n in names:
-        if n in df.columns:
+        if n in cols:
             return n
-    raise KeyError(f"none of {names} in columns {list(df.columns)}")
+    raise KeyError(f"none of {names} in columns {cols}")
 
 
 def load_tables(root):
@@ -70,22 +78,34 @@ def load_tables(root):
         mp, lp = find_one(root, mfile), find_one(root, lfile)
         if mp is None or lp is None:
             raise FileNotFoundError(f"could not find {mfile} / {lfile} under {root}")
-        m, lab = pd.read_csv(mp), pd.read_csv(lp)
+        m, lab = _read_csv(mp), _read_csv(lp)
         print(f"[tables] {split}: metadata {mp} ({len(m)} rows), labels {lp} ({len(lab)} rows)")
-        meta.append(m)
-        labels.append(lab)
-    meta, labels = pd.concat(meta, ignore_index=True), pd.concat(labels, ignore_index=True)
+        meta += m
+        labels += lab
     vn_m, vn_l = col(meta, "VolumeName"), col(labels, "VolumeName")
-    meta["name"] = meta[vn_m].astype(str).str.replace(".nii.gz", "", regex=False)
-    labels["name"] = labels[vn_l].astype(str).str.replace(".nii.gz", "", regex=False)
-    diseases = [c for c in labels.columns if c not in (vn_l, "name")]
+    for r in meta:
+        r["name"] = str(r[vn_m]).replace(".nii.gz", "")
+    for r in labels:
+        r["name"] = str(r[vn_l]).replace(".nii.gz", "")
+    diseases = [c for c in labels[0].keys() if c not in (vn_l, "name")]
     c_slope, c_inter = col(meta, "RescaleSlope"), col(meta, "RescaleIntercept")
     c_xy, c_z = col(meta, "XYSpacing", "XY_Spacing"), col(meta, "ZSpacing", "Z_Spacing")
-    md = {}
-    for r in meta.to_dict("records"):
-        sx, sy = parse_xy(r[c_xy])
-        md[r["name"]] = dict(slope=float(r[c_slope]), inter=float(r[c_inter]), sx=sx, sy=sy, sz=float(r[c_z]))
-    lab = {r["name"]: [int(round(float(r[d]))) for d in diseases] for r in labels.to_dict("records")}
+    md, bad_md = {}, []
+    for r in meta:
+        try:
+            sx, sy = parse_xy(r[c_xy])
+            md[r["name"]] = dict(slope=float(r[c_slope]), inter=float(r[c_inter]), sx=sx, sy=sy, sz=float(r[c_z]))
+        except (ValueError, TypeError, IndexError):
+            bad_md.append(r["name"])      # missing slope / intercept / spacing: skip, never guess
+    lab, bad_lab = {}, []
+    for r in labels:
+        try:
+            lab[r["name"]] = [int(round(float(r[d]))) for d in diseases]
+        except (ValueError, TypeError):
+            bad_lab.append(r["name"])
+    if bad_md or bad_lab:
+        print(f"[tables] skipped {len(bad_md)} metadata rows (missing slope/intercept/spacing) and "
+              f"{len(bad_lab)} label rows (missing values); e.g. {(bad_md + bad_lab)[:3]}")
     return md, lab, diseases
 
 
@@ -134,6 +154,9 @@ def load_hu_zyx(path, m, cfg):
 
 def process_hu(hu, spacing, cfg):
     target = tuple(f / s for f, s in zip(cfg.fov, cfg.shape))
+    # scanner padding outside the field-of-view circle (e.g. -3024, -8192) -> air, BEFORE smoothing/resampling,
+    # so it cannot bleed into tissue at the edge of the circle
+    hu = np.maximum(np.asarray(hu, dtype=np.float32), -1024.0)
     fixed = center_fit(resample(hu, spacing, target), cfg.shape, fill=-1024.0)
     drr = make_drr(fixed, size=cfg.drr_px, spacing_zx=(target[0], target[2]))
     return fixed, drr, target
@@ -241,6 +264,7 @@ def main():
     p.add_argument("--val_frac", type=float, default=0.05, help="fraction of TRAIN patients held out for val")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--lists_only", action="store_true", help="just (re)write lists from existing volumes")
+    p.add_argument("--subset_json", default="", help="selection.json from download_ctrate_subset.py: use only its files")
     cfg = p.parse_args()
     cfg.fov = tuple(float(v) for v in cfg.fov.split(","))
     cfg.shape = tuple(int(v) for v in cfg.shape.split(","))
@@ -252,6 +276,11 @@ def main():
     niftis = index_niftis(cfg.root)
     print(f"[files] {len(niftis)} NIfTI volumes found under {cfg.root}")
     names = select([n for n in niftis if n in md and n in lab], cfg.recons)
+    if cfg.subset_json:
+        allowed = {os.path.basename(f)[:-len('.nii.gz')] for f in json.load(open(cfg.subset_json))['files']}
+        before = len(names)
+        names = [n for n in names if n in allowed]
+        print(f"[subset] {cfg.subset_json}: {len(allowed)} files listed; keeping {len(names)} of {before} available volumes")
     print(f"[files] {len(names)} selected (recons={cfg.recons}); "
           f"stored size ~{np.prod(cfg.shape) / 2**20:.1f} MB each, ~{len(names) * np.prod(cfg.shape) / 2**40:.2f} TB total")
 
